@@ -238,6 +238,7 @@ class GetFromVertexSearchTool(Tool):
         if classification == "TRUE" and not results:
             results = [{"url": url} for url in sources[:5]]
 
+        explanation_native = data.get("explanation_native", "") if payload.get("native_language") != "English" else data.get("explanation_en", "")
         return json.dumps(
             {
                 "source": "Google Vertex AI Search",
@@ -245,7 +246,7 @@ class GetFromVertexSearchTool(Tool):
                 "confidence": data.get("confidence", 0.8 if classification == "TRUE" else 0.1),
                 "results": results,
                 "explanation": data.get("explanation_en", ""),
-                "explanation_native": data.get("explanation_native", ""),
+                "explanation_native": explanation_native,
                 "reason": (
                     "Vertex AI Search found credible sources confirming the claim."
                     if classification == "TRUE"
