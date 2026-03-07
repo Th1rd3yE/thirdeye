@@ -1,2 +1,5 @@
-google-cloud-aiplatform>=1.140.0
+groq>=0.11.0
 python-dotenv>=1.0.0
+requests>=2.32.0
+fastapi>=0.115.0
+uvicorn[standard]>=0.30.0

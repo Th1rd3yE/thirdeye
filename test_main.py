@@ -1,20 +1,8 @@
 """
-ThirdEye — Federated Agentic News Verification System
-Run:  python main.py
+ThirdEye — Local test runner
+Run:  python test_main.py
 
-Pipeline per query
-──────────────────
-1. Local pre-processing  →  language detection + keyword extraction
-2. Build standardized JSON payload (no LLM needed for this step)
-3. Agent calls get_from_data_sources  →  check classification
-4. If classification=false, agent calls get_from_vertex_search  →  check classification
-5. If both fail  →  report unverifiable / false
-
-Demo scenarios
-──────────────
-Scenario A: Chinese query  →  Tool 1 (data sources) classifies TRUE  →  answer in Chinese
-Scenario B: English query  →  Tool 1 FALSE, Tool 2 (Vertex) classifies TRUE  →  answer in English
-Scenario C: Vague query    →  both tools FALSE  →  unverifiable response
+Exercises the three demo scenarios against the live agent.
 """
 
 from __future__ import annotations
