@@ -28,6 +28,7 @@ from agent import (
     build_query_payload,
     GetFromDataSourcesTool,
     GetFromVertexSearchTool,
+    RecommendedNextActionTool,
 )
 
 load_dotenv()
@@ -51,6 +52,7 @@ async def lifespan(_app: FastAPI):
     _registry = ToolRegistry()
     _registry.register(GetFromDataSourcesTool())
     _registry.register(GetFromVertexSearchTool())
+    _registry.register(RecommendedNextActionTool())
     _agent = ReactAgent(registry=_registry)
     logger.info("ThirdEye agent initialised.")
     yield
@@ -92,6 +94,7 @@ class VerifyResult(BaseModel):
     classification: str | None  # "TRUE" | "FALSE" | "UNCERTAIN"
     explanation: str
     sources: list[str]
+    recommended_next_actions: list[str]
 
 
 class VerifyResponse(BaseModel):
@@ -182,6 +185,7 @@ async def verify(body: VerifyRequest, request: Request) -> VerifyResponse:
             classification=result.classification,
             explanation=result.explanation,
             sources=result.sources,
+            recommended_next_actions=result.recommended_next_actions,
         ),
         answer=result.answer,
         iterations=result.iterations,

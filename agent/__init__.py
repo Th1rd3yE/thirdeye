@@ -1,7 +1,7 @@
 from agent.react_agent import ReactAgent, AgentResult, AgentStep, StepType
 from agent.tools import Tool, ToolRegistry, ToolSchema, ParameterProperty
 from agent.preprocessor import build_query_payload
-from agent.data_tools import GetFromDataSourcesTool, GetFromVertexSearchTool
+from agent.data_tools import GetFromDataSourcesTool, GetFromVertexSearchTool, RecommendedNextActionTool
 
 __all__ = [
     "ReactAgent",
@@ -15,4 +15,5 @@ __all__ = [
     "build_query_payload",
     "GetFromDataSourcesTool",
     "GetFromVertexSearchTool",
+    "RecommendedNextActionTool",
 ]

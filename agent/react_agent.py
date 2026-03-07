@@ -27,25 +27,32 @@ detected keywords, language, country, and date.
 STEP 1 — Call `get_from_data_sources` with the full JSON payload string.
   • Parse the response and check the `classification` field.
   • If classification = true  → The news is VERIFIED by internal records.
-    Present the data clearly to the user in their native_language. STOP — do not call any more tools.
+    Proceed directly to STEP 3.
   • If classification = false → Proceed to STEP 2.
 
 STEP 2 — Call `get_from_vertex_search` with the SAME JSON payload string.
   • Parse the response and check the `classification` field.
   • If classification = true  → The news is VERIFIED by web sources.
-    Present the top results clearly to the user in their native_language. STOP.
+    Proceed directly to STEP 3.
   • If classification = false → Proceed to STEP 3.
 
-STEP 3 — Both sources failed to classify.
-  Inform the user (in their native_language) that:
-  - The news could NOT be verified.
-  - No credible source was found.
-  - They should treat the claim as unverified/false until proven otherwise.
+STEP 3 — Call `get_recommended_next_actions` with:
+  • `question`       — the original user question
+  • `classification` — the final classification ("TRUE", "FALSE", or "UNCERTAIN")
+  • `explanation`    — the explanation text from whichever source classified it
+  • `native_language`— from the payload
+
+STEP 4 — Respond to the user in their native_language:
+  • If verified (TRUE): present the findings clearly.
+  • If unverified (FALSE / UNCERTAIN): inform the user the claim could not be verified
+    and they should treat it as unverified until proven otherwise.
+  • Always include the recommended next actions in your response.
 
 ━━━ RULES ━━━
 • Always respond in the `native_language` field from the payload.
 • Pass the full JSON payload string unchanged to each tool.
 • Never skip STEP 1. Never call vertex search before data sources.
+• Always call `get_recommended_next_actions` before giving your final answer.
 • Be concise and factual in your final answer."""
 
 
@@ -78,12 +85,17 @@ _VALID_CLASSIFICATIONS = {"TRUE", "FALSE", "UNCERTAIN"}
 
 def _extract_structured_result(
     observation: str,
-) -> tuple[str | None, str, list[str]]:
-    """Parse a tool observation JSON and extract classification, explanation, sources."""
+) -> tuple[str | None, str, list[str], list[str]]:
+    """Parse a tool observation JSON and extract classification, explanation, sources, recommended_next_actions."""
     try:
         data = json.loads(observation)
     except (json.JSONDecodeError, ValueError):
-        return None, "", []
+        return None, "", [], []
+
+    # Handle recommended_next_actions-only payloads (from RecommendedNextActionTool)
+    if "recommended_next_actions" in data and "classification" not in data:
+        actions = data.get("recommended_next_actions") or []
+        return None, "", [], [str(a) for a in actions]
 
     raw = data.get("classification")
     if isinstance(raw, bool):
@@ -91,7 +103,7 @@ def _extract_structured_result(
     elif isinstance(raw, str) and raw.upper() in _VALID_CLASSIFICATIONS:
         classification = raw.upper()
     else:
-        return None, "", []
+        return None, "", [], []
 
     explanation_native = data.get("explanation_native", "") or ""
     explanation_en = (
@@ -112,7 +124,7 @@ def _extract_structured_result(
         if url:
             sources.append(url)
 
-    return classification, explanation, sources
+    return classification, explanation, sources, []
 
 
 @dataclass
@@ -123,6 +135,7 @@ class AgentResult:
     classification: str | None = None
     explanation: str = ""
     sources: list[str] = field(default_factory=list)
+    recommended_next_actions: list[str] = field(default_factory=list)
 
     def pretty_print(self) -> None:
         print("\n" + "=" * 60)
@@ -171,6 +184,7 @@ class ReactAgent:
         result_classification: str | None = None
         result_explanation: str = ""
         result_sources: list[str] = []
+        result_recommended_actions: list[str] = []
 
         if verbose:
             print(f"\nQuery: {query}\n{chr(9472) * 60}")
@@ -286,7 +300,9 @@ class ReactAgent:
                     if verbose:
                         print(obs_step)
 
-                    cls, expl, srcs = _extract_structured_result(observation)
+                    cls, expl, srcs, actions = _extract_structured_result(observation)
+                    if actions:
+                        result_recommended_actions = actions
                     if cls is not None:
                         result_classification = cls
                         result_explanation = expl
@@ -321,6 +337,7 @@ class ReactAgent:
                 classification=result_classification,
                 explanation=result_explanation,
                 sources=result_sources,
+                recommended_next_actions=result_recommended_actions,
             )
 
         logger.warning("[%s] Max iterations (%d) reached without a final answer",
@@ -336,4 +353,5 @@ class ReactAgent:
             classification=result_classification,
             explanation=result_explanation,
             sources=result_sources,
+            recommended_next_actions=result_recommended_actions,
         )

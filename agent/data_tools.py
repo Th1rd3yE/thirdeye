@@ -1,8 +1,9 @@
 """
 Tool implementations for ThirdEye's two verification sources.
 
-get_from_data_sources  — real HTTP call to the DS endpoint (generate-and-fetch)
-get_from_vertex_search — real HTTP call to the Vertex AI Search endpoint
+get_from_data_sources        — real HTTP call to the DS endpoint (generate-and-fetch)
+get_from_vertex_search       — real HTTP call to the Vertex AI Search endpoint
+get_recommended_next_actions — LLM-generated recommended actions based on classification
 """
 
 from __future__ import annotations
@@ -13,6 +14,7 @@ import time
 from typing import Any
 
 import requests
+from groq import Groq
 
 from agent.tools import ParameterProperty, Tool, ToolSchema
 
@@ -22,30 +24,33 @@ from agent.tools import ParameterProperty, Tool, ToolSchema
 
 _DS_PAYLOAD_SCHEMA = ToolSchema(
     properties={
-        "question": ParameterProperty(
+        "country": ParameterProperty(
+            type="string",
+            description="Country context of the query, e.g. 'China' or 'Global'.",
+        ),
+        "date": ParameterProperty(
+            type="string",
+            description="Query date, e.g. 'March 2026'.",
+        ),
+        "questions": ParameterProperty(
             type="string",
             description="The original user question to verify.",
         ),
-        "keywords": ParameterProperty(
+        "key_words": ParameterProperty(
             type="array",
             items={"type": "string"},
             description="Keywords extracted from the question.",
         ),
-        "country": ParameterProperty(
+        "native_language": ParameterProperty(
             type="string",
-            description="Country context of the query, e.g. 'Singapore' or 'Global'.",
+            description="User's native language, e.g. 'Chinese (Simplified)' or 'English'.",
         ),
-        "languages": ParameterProperty(
-            type="array",
-            items={"type": "string"},
-            description="Languages to search in, e.g. ['English', 'Chinese'].",
-        ),
-        "date": ParameterProperty(
+        "english_language": ParameterProperty(
             type="string",
-            description="Query date in YYYY-MM-DD format, e.g. '2026-03-10'.",
+            description="Language used for source analysis, typically 'English'.",
         ),
     },
-    required=["question", "country", "languages"],
+    required=["country", "questions", "native_language"],
 )
 
 _VERTEX_PAYLOAD_SCHEMA = ToolSchema(
@@ -104,19 +109,21 @@ class GetFromDataSourcesTool(Tool):
     def run(
         self,
         *args: object,
-        question: str = "",
-        keywords: list[str] | None = None,
         country: str = "Global",
-        languages: list[str] | None = None,
         date: str = "",
+        questions: str = "",
+        key_words: list[str] | None = None,
+        native_language: str = "English",
+        english_language: str = "English",
         **kwargs: object,
     ) -> str:
         payload = {
-            "question": question,
-            "keywords": keywords or [],
             "country": country,
-            "languages": languages or ["English"],
             "date": date,
+            "questions": questions,
+            "key_words": key_words or [],
+            "native_language": native_language,
+            "english_language": english_language,
         }
         try:
             resp = requests.post(self._ENDPOINT, json=payload, timeout=60)
@@ -125,11 +132,12 @@ class GetFromDataSourcesTool(Tool):
         except requests.RequestException as exc:
             return json.dumps(
                 {
-                    "source": "ThirdEye Internal Data Sources",
+                    "claim": questions,
                     "classification": "FALSE",
                     "confidence": 0.0,
-                    "data": None,
-                    "reason": f"Data sources endpoint error: {exc}",
+                    "explanation_en": f"Data sources endpoint error: {exc}",
+                    "explanation_native": f"Data sources endpoint error: {exc}",
+                    "sources": [],
                 },
                 ensure_ascii=False,
                 indent=2,
@@ -145,18 +153,12 @@ class GetFromDataSourcesTool(Tool):
 
         return json.dumps(
             {
-                "source": "ThirdEye Internal Data Sources",
+                "claim": questions,
                 "classification": classification,
                 "confidence": data.get("confidence", 0.9 if classification == "TRUE" else 0.1),
-                "data": data.get("data"),
-                "explanation": data.get("explanation_en", ""),
+                "explanation_en": data.get("explanation_en", ""),
                 "explanation_native": data.get("explanation_native", ""),
-                "reason": (
-                    "Internal data sources confirmed the claim."
-                    if classification == "TRUE"
-                    else data.get("explanation_en")
-                    or "No matching verified records found in internal database."
-                ),
+                "sources": data.get("sources", []),
             },
             ensure_ascii=False,
             indent=2,
@@ -276,3 +278,116 @@ class GetFromVertexSearchTool(Tool):
             ensure_ascii=False,
             indent=2,
         )
+
+
+# ---------------------------------------------------------------------------
+# RecommendedNextActionTool
+# ---------------------------------------------------------------------------
+
+_RECOMMENDED_ACTION_SCHEMA = ToolSchema(
+    properties={
+        "question": ParameterProperty(
+            type="string",
+            description="The original user question that was verified.",
+        ),
+        "classification": ParameterProperty(
+            type="string",
+            description="Verification result: 'TRUE', 'FALSE', or 'UNCERTAIN'.",
+            enum=["TRUE", "FALSE", "UNCERTAIN"],
+        ),
+        "explanation": ParameterProperty(
+            type="string",
+            description="Explanation from the verification step.",
+        ),
+        "native_language": ParameterProperty(
+            type="string",
+            description="User's native language for the response, e.g. 'English' or 'Chinese (Simplified)'.",
+        ),
+    },
+    required=["question", "classification"],
+)
+
+_ACTIONS_PROMPT = """\
+You are an advisor helping users respond to news or information they just had verified.
+
+Given:
+- Question: {question}
+- Verification result: {classification}
+- Explanation: {explanation}
+
+Produce exactly 3 brief, practical recommended actions the user should take.
+Each action must be a single sentence (≤ 20 words).
+Respond ONLY with a valid JSON array of 3 strings, nothing else.
+Example: ["Action one.", "Action two.", "Action three."]
+"""
+
+
+class RecommendedNextActionTool(Tool):
+    """Generates 3 recommended next actions based on the verification result."""
+
+    name = "get_recommended_next_actions"
+    description = (
+        "Generates 3 short, practical recommended actions for the user based on the "
+        "classification result (TRUE / FALSE / UNCERTAIN) and the verification explanation. "
+        "ALWAYS call this tool as the LAST step after the classification is determined."
+    )
+    schema = _RECOMMENDED_ACTION_SCHEMA
+
+    _MODEL = os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile")
+
+    def run(
+        self,
+        *args: object,
+        question: str = "",
+        classification: str = "FALSE",
+        explanation: str = "",
+        native_language: str = "English",
+        **kwargs: object,
+    ) -> str:
+        prompt = _ACTIONS_PROMPT.format(
+            question=question,
+            classification=classification,
+            explanation=explanation or "No additional explanation provided.",
+        )
+        try:
+            client = Groq(api_key=os.environ["GROQ_API_KEY"])
+            response = client.chat.completions.create(
+                model=self._MODEL,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.3,
+                max_tokens=256,
+            )
+            raw = (response.choices[0].message.content or "").strip()
+            actions: list[str] = json.loads(raw)
+            if not isinstance(actions, list):
+                raise ValueError("Expected a JSON array")
+            actions = [str(a) for a in actions[:3]]
+        except Exception as exc:
+            actions = _fallback_actions(classification)
+
+        return json.dumps(
+            {"recommended_next_actions": actions},
+            ensure_ascii=False,
+            indent=2,
+        )
+
+
+def _fallback_actions(classification: str) -> list[str]:
+    """Rule-based fallback when LLM call fails."""
+    if classification == "TRUE":
+        return [
+            "You can share this information with confidence as it has been verified.",
+            "Refer to the cited sources for more details.",
+            "Stay updated by following reputable news outlets on this topic.",
+        ]
+    if classification == "UNCERTAIN":
+        return [
+            "Treat this information with caution until further verified.",
+            "Cross-check with multiple reputable sources before sharing.",
+            "Avoid making decisions based solely on this unconfirmed information.",
+        ]
+    return [
+        "Do not share this information as it could not be verified.",
+        "Seek information from official or trusted government/news sources.",
+        "Report the claim to a fact-checking organisation if you encounter it again.",
+    ]
