@@ -92,7 +92,6 @@ class VerifyResult(BaseModel):
     classification: str | None  # "TRUE" | "FALSE" | "UNCERTAIN"
     explanation: str
     sources: list[str]
-    steps: dict[str, str]
 
 
 class VerifyResponse(BaseModel):
@@ -178,21 +177,11 @@ async def verify(body: VerifyRequest, request: Request) -> VerifyResponse:
         for step in result.steps
     ]
 
-    reasoning_steps: dict[str, str] = {
-        str(i): (
-            f"[{step.step_type}] {step.content}"
-            if not step.tool_name
-            else f"[{step.step_type} → {step.tool_name}] {step.content}"
-        )
-        for i, step in enumerate(result.steps, start=1)
-    }
-
     return VerifyResponse(
         result=VerifyResult(
             classification=result.classification,
             explanation=result.explanation,
             sources=result.sources,
-            steps=reasoning_steps,
         ),
         answer=result.answer,
         iterations=result.iterations,

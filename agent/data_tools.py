@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from typing import Any
 
 import requests
@@ -199,18 +200,36 @@ class GetFromVertexSearchTool(Tool):
             "english_language": english_language,
             "context": context,
         }
-        try:
-            resp = requests.post(self._ENDPOINT, json=payload, timeout=60)
-            resp.raise_for_status()
-            data: dict[str, Any] = resp.json()
-        except requests.RequestException as exc:
+        max_retries = 4
+        backoff = 5.0  # seconds; doubles each retry
+        last_exc: requests.RequestException | None = None
+        data: dict[str, Any] | None = None
+
+        for attempt in range(max_retries):
+            try:
+                resp = requests.post(self._ENDPOINT, json=payload, timeout=60)
+                if resp.status_code == 429:
+                    retry_after = float(resp.headers.get("Retry-After", backoff))
+                    time.sleep(retry_after)
+                    backoff *= 2
+                    continue
+                resp.raise_for_status()
+                data = resp.json()
+                break
+            except requests.RequestException as exc:
+                last_exc = exc
+                if attempt < max_retries - 1:
+                    time.sleep(backoff)
+                    backoff *= 2
+
+        if data is None:
             return json.dumps(
                 {
                     "source": "Google Vertex AI Search",
                     "classification": False,
                     "confidence": 0.0,
                     "results": [],
-                    "reason": f"Vertex AI Search endpoint error: {exc}",
+                    "reason": f"Vertex AI Search endpoint error: {last_exc}",
                 },
                 ensure_ascii=False,
                 indent=2,
