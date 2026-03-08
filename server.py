@@ -29,6 +29,7 @@ from agent import (
     GetFromDataSourcesTool,
     GetFromVertexSearchTool,
     RecommendedNextActionTool,
+    ReanalyserTool,
 )
 
 load_dotenv()
@@ -52,6 +53,7 @@ async def lifespan(_app: FastAPI):
     _registry = ToolRegistry()
     _registry.register(GetFromDataSourcesTool())
     _registry.register(GetFromVertexSearchTool())
+    _registry.register(ReanalyserTool())
     _registry.register(RecommendedNextActionTool())
     _agent = ReactAgent(registry=_registry)
     logger.info("ThirdEye agent initialised.")

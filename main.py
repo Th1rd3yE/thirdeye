@@ -29,6 +29,8 @@ from agent import (
     build_query_payload,
     GetFromDataSourcesTool,
     GetFromVertexSearchTool,
+    ReanalyserTool,
+    RecommendedNextActionTool,
 )
 
 load_dotenv()
@@ -38,6 +40,8 @@ def build_registry() -> ToolRegistry:
     registry = ToolRegistry()
     registry.register(GetFromDataSourcesTool())
     registry.register(GetFromVertexSearchTool())
+    registry.register(ReanalyserTool())
+    registry.register(RecommendedNextActionTool())
     return registry
 
 

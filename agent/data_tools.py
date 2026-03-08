@@ -32,7 +32,7 @@ _DS_PAYLOAD_SCHEMA = ToolSchema(
             type="string",
             description="Query date, e.g. 'March 2026'.",
         ),
-        "questions": ParameterProperty(
+        "context": ParameterProperty(
             type="string",
             description="The original user question to verify.",
         ),
@@ -50,7 +50,7 @@ _DS_PAYLOAD_SCHEMA = ToolSchema(
             description="Language used for source analysis, typically 'English'.",
         ),
     },
-    required=["country", "questions", "native_language"],
+    required=["country", "context", "native_language"],
 )
 
 _VERTEX_PAYLOAD_SCHEMA = ToolSchema(
@@ -63,7 +63,7 @@ _VERTEX_PAYLOAD_SCHEMA = ToolSchema(
             type="string",
             description="Query date, e.g. 'March 2026'.",
         ),
-        "questions": ParameterProperty(
+        "context": ParameterProperty(
             type="string",
             description="The original user question to verify.",
         ),
@@ -120,7 +120,7 @@ class GetFromDataSourcesTool(Tool):
         payload = {
             "country": country,
             "date": date,
-            "questions": questions,
+            "context": questions,
             "key_words": key_words or [],
             "native_language": native_language,
             "english_language": english_language,
@@ -129,6 +129,7 @@ class GetFromDataSourcesTool(Tool):
             resp = requests.post(self._ENDPOINT, json=payload, timeout=60)
             resp.raise_for_status()
             data: dict[str, Any] = resp.json()
+            print(data)
         except requests.RequestException as exc:
             return json.dumps(
                 {
@@ -264,7 +265,7 @@ class GetFromVertexSearchTool(Tool):
             {
                 "source": "Google Vertex AI Search",
                 "classification": classification,
-                "confidence": data.get("confidence", 0.8 if classification == "TRUE" else 0.1),
+                "confidence": data.get("truth_score"),
                 "results": results,
                 "explanation": data.get("explanation_en", ""),
                 "explanation_native": explanation_native,
@@ -367,6 +368,123 @@ class RecommendedNextActionTool(Tool):
 
         return json.dumps(
             {"recommended_next_actions": actions},
+            ensure_ascii=False,
+            indent=2,
+        )
+
+
+# ---------------------------------------------------------------------------
+# ReanalyserTool
+# ---------------------------------------------------------------------------
+
+_REANALYSER_SCHEMA = ToolSchema(
+    properties={
+        "question": ParameterProperty(
+            type="string",
+            description="The original user question that was verified.",
+        ),
+        "classification": ParameterProperty(
+            type="string",
+            description="The classification from the verification tool: 'TRUE', 'FALSE', or 'UNCERTAIN'.",
+            enum=["TRUE", "FALSE", "UNCERTAIN"],
+        ),
+        "explanation": ParameterProperty(
+            type="string",
+            description="The explanation text returned by the verification tool.",
+        ),
+    },
+    required=["question", "classification", "explanation"],
+)
+
+_REANALYSER_PROMPT = """\
+You are a fact-checking validation assistant. Your job is to determine whether a \
+given classification (TRUE/FALSE/UNCERTAIN) is logically consistent with the \
+explanation and the original question.
+
+Question: {question}
+Classification: {classification}
+Explanation: {explanation}
+
+Analysis rules:
+1. Read the question carefully — is it asking whether something POSITIVE or NEGATIVE is true?
+2. Read the explanation — does it support or contradict the claim in the question?
+3. A classification of TRUE means "yes, the claim in the question is correct".
+   A classification of FALSE means "no, the claim in the question is incorrect".
+
+Common mistake to catch:
+  - Question: "Is it true that [place/thing] is BAD?"
+    Explanation: "[place/thing] is actually diverse/good/well-regarded."
+    → The explanation CONTRADICTS the claim, so the answer should be FALSE, not TRUE.
+
+Respond ONLY with a valid JSON object with exactly these fields:
+{{
+  "classification": "TRUE" | "FALSE" | "UNCERTAIN",
+  "changed": true | false,
+  "reason": "One or two sentences describing what the explanation actually says about the topic — factual content only. Do NOT mention the classification values, do NOT say things like 'the classification should be X rather than Y', and do NOT describe your reasoning process."
+}}
+"""
+
+
+class ReanalyserTool(Tool):
+    """Cross-checks a classification against the explanation and original question."""
+
+    name = "reanalyse"
+    description = (
+        "Validates whether the classification (TRUE/FALSE/UNCERTAIN) is logically "
+        "consistent with the explanation and the original question. "
+        "If the explanation contradicts the classification, this tool corrects it. "
+        "ALWAYS call this tool AFTER obtaining a classification but BEFORE calling "
+        "get_recommended_next_actions."
+    )
+    schema = _REANALYSER_SCHEMA
+
+    _MODEL = os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile")
+
+    def run(
+        self,
+        *args: object,
+        question: str = "",
+        classification: str = "FALSE",
+        explanation: str = "",
+        **kwargs: object,
+    ) -> str:
+        prompt = _REANALYSER_PROMPT.format(
+            question=question,
+            classification=classification,
+            explanation=explanation or "No explanation provided.",
+        )
+        try:
+            client = Groq(api_key=os.environ["GROQ_API_KEY"])
+            response = client.chat.completions.create(
+                model=self._MODEL,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.0,
+                max_tokens=256,
+            )
+            raw = (response.choices[0].message.content or "").strip()
+            result: dict[str, Any] = json.loads(raw)
+            final_cls = str(result.get("classification", classification)).upper()
+            if final_cls not in {"TRUE", "FALSE", "UNCERTAIN"}:
+                final_cls = classification
+            changed = bool(result.get("changed", False))
+            reason = str(result.get("reason", ""))
+        except Exception as exc:
+            return json.dumps(
+                {
+                    "classification": classification,
+                    "changed": False,
+                    "reason": f"Reanalysis failed, keeping original classification: {exc}",
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+
+        return json.dumps(
+            {
+                "classification": final_cls,
+                "changed": changed,
+                "reason": reason,
+            },
             ensure_ascii=False,
             indent=2,
         )

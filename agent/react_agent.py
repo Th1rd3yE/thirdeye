@@ -26,34 +26,46 @@ detected keywords, language, country, and date.
 
 STEP 1 — Call `get_from_data_sources` with the full JSON payload string.
   • Parse the response and check the `classification` field.
-  • If classification = true  → The news is VERIFIED by internal records.
-    Proceed directly to STEP 3.
+  • If classification = true  → Proceed to STEP 3.
   • If classification = false → Proceed to STEP 2.
 
 STEP 2 — Call `get_from_vertex_search` with the SAME JSON payload string.
   • Parse the response and check the `classification` field.
-  • If classification = true  → The news is VERIFIED by web sources.
-    Proceed directly to STEP 3.
-  • If classification = false → Proceed to STEP 3.
+  • Proceed to STEP 3 regardless of the result.
 
-STEP 3 — Call `get_recommended_next_actions` with:
+STEP 3 — Call `reanalyse` with:
   • `question`       — the original user question
-  • `classification` — the final classification ("TRUE", "FALSE", or "UNCERTAIN")
+  • `classification` — the classification obtained from STEP 1 or STEP 2
   • `explanation`    — the explanation text from whichever source classified it
+  This tool cross-checks whether the classification is logically consistent with
+  the explanation and the question. Use its returned `classification` as the
+  FINAL classification going forward.
+
+STEP 4 — Call `get_recommended_next_actions` with:
+  • `question`       — the original user question
+  • `classification` — the FINAL classification from STEP 3 ("TRUE", "FALSE", or "UNCERTAIN")
+  • `explanation`    — the explanation text
   • `native_language`— from the payload
 
-STEP 4 — Respond to the user in their native_language:
+STEP 5 — Respond to the user in their native_language:
   • If verified (TRUE): present the findings clearly.
   • If unverified (FALSE / UNCERTAIN): inform the user the claim could not be verified
     and they should treat it as unverified until proven otherwise.
   • Always include the recommended next actions in your response.
+  • Your final answer MUST be written in plain, human-readable prose only.
+    It MUST NOT contain any JSON, raw data payloads, file paths, tool outputs,
+    internal field names, or any machine-readable content whatsoever.
 
 ━━━ RULES ━━━
 • Always respond in the `native_language` field from the payload.
 • Pass the full JSON payload string unchanged to each tool.
 • Never skip STEP 1. Never call vertex search before data sources.
+• Always call `reanalyse` before `get_recommended_next_actions`.
 • Always call `get_recommended_next_actions` before giving your final answer.
-• Be concise and factual in your final answer."""
+• Be concise and factual in your final answer.
+• FINAL ANSWER FORMAT: Plain human-readable text only. Never include JSON,
+  raw data, file contents, internal keys, or any structured data in your
+  final answer. Summarise all findings in natural language sentences."""
 
 
 class StepType(str, Enum):
@@ -80,7 +92,7 @@ class AgentStep:
         return f"{header}\n{self.content}"
 
 
-_VALID_CLASSIFICATIONS = {"TRUE", "FALSE", "UNCERTAIN"}
+_VALID_CLASSIFICATIONS = {"TRUE", "FALSE", "UNCERTAIN", "UNVERIFIED"}
 
 
 def _extract_structured_result(
@@ -123,6 +135,15 @@ def _extract_structured_result(
         url = data["data"].get("source_url", "")
         if url:
             sources.append(url)
+    # Handle flat "sources" list returned by DS tool
+    if not sources:
+        for s in data.get("sources") or []:
+            if isinstance(s, str) and s:
+                sources.append(s)
+            elif isinstance(s, dict):
+                url = s.get("url", "")
+                if url:
+                    sources.append(url)
 
     return classification, explanation, sources, []
 
@@ -146,6 +167,22 @@ class AgentResult:
             print("-" * 40)
         print(f"\nFINAL ANSWER:\n{self.answer}")
         print("=" * 60)
+
+
+def _is_raw_data(text: str) -> bool:
+    """Return True if `text` looks like a raw JSON payload or data dump rather than prose."""
+    stripped = text.strip()
+    # Starts with a JSON object or array
+    if stripped.startswith(("{", "[")):
+        try:
+            json.loads(stripped)
+            return True
+        except (json.JSONDecodeError, ValueError):
+            pass
+    # Contains a large inline JSON blob (heuristic: a key-value pair pattern)
+    if stripped.count('":') >= 3 or stripped.count("': ") >= 3:
+        return True
+    return False
 
 
 class ReactAgent:
@@ -305,8 +342,12 @@ class ReactAgent:
                         result_recommended_actions = actions
                     if cls is not None:
                         result_classification = cls
-                        result_explanation = expl
-                        result_sources = srcs
+                        # Reanalyser only corrects the classification; preserve the
+                        # original explanation from the data/search source so that
+                        # internal reanalyser reasoning never surfaces to the user.
+                        if tool_name != "reanalyse":
+                            result_explanation = expl
+                            result_sources = srcs
                         if cls in ("TRUE", "UNCERTAIN"):
                             logger.info(
                                 "[%s] ★ DECISIVE ANSWER from %s — classification=%s",
@@ -325,6 +366,27 @@ class ReactAgent:
 
             logger.info("[%s]   [ANSWER] Reached final answer on iteration %d | preview=%r",
                         req_id, iteration, content[:200])
+
+            # Guard: if the model returned raw JSON or data instead of prose,
+            # reject it and continue the loop so the model can self-correct.
+            if _is_raw_data(content):
+                logger.warning(
+                    "[%s]   Final answer appears to contain raw data — injecting correction prompt",
+                    req_id,
+                )
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": (
+                            "Your previous response contained raw data or JSON. "
+                            "Please rewrite your answer as plain, human-readable prose "
+                            "in the user's native language. Do not include any JSON, "
+                            "data fields, file contents, or structured data."
+                        ),
+                    }
+                )
+                continue
+
             answer_step = AgentStep(StepType.ANSWER, content)
             steps.append(answer_step)
             if verbose:
