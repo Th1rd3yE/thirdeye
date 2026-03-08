@@ -63,7 +63,7 @@ _VERTEX_PAYLOAD_SCHEMA = ToolSchema(
             type="string",
             description="Query date, e.g. 'March 2026'.",
         ),
-        "context": ParameterProperty(
+        "questions": ParameterProperty(
             type="string",
             description="The original user question to verify.",
         ),
