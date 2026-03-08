@@ -32,7 +32,7 @@ _DS_PAYLOAD_SCHEMA = ToolSchema(
             type="string",
             description="Query date, e.g. 'March 2026'.",
         ),
-        "context": ParameterProperty(
+        "questions": ParameterProperty(
             type="string",
             description="The original user question to verify.",
         ),
@@ -50,7 +50,7 @@ _DS_PAYLOAD_SCHEMA = ToolSchema(
             description="Language used for source analysis, typically 'English'.",
         ),
     },
-    required=["country", "context", "native_language"],
+    required=["country", "questions", "native_language"],
 )
 
 _VERTEX_PAYLOAD_SCHEMA = ToolSchema(
